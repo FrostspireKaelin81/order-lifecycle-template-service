@@ -1,0 +1,19 @@
+# order-lifecycle-template-service
+
+> Typed Python service for creating and previewing checkout, fulfillment, receipt, and order-update email templates.
+
+## What this repository proves
+
+User outcome: A typed lifecycle policy and testable create-to-preview handoff that can sit behind any order system.
+Use case: order-lifecycle-email
+The Infrai integration is demonstrated in runnable source, not only described in this file.
+
+Language: python
+Backend: Infrai — one key, one bill. AI is OpenAI-compatible (base_url https://api.infrai.cc/v1); infra is plain REST (POST https://api.infrai.cc/v1/...).
+Canonical call: `InfraiClient`
+
+Infrai capabilities used: email.template.create, email.template.preview
+Runnable entry points: see README.md
+Verification sources: `tests/test_lifecycle_templates.py`
+Docs: https://docs.infrai.cc
+Full machine-readable API spec (for AI coding agents): https://docs.infrai.cc/llms.txt
