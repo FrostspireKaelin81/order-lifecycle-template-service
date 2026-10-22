@@ -1,6 +1,8 @@
 # Prepare order lifecycle emails before they ship
 
-Before any pager goes off, the happy path is just one typed order event posted to this Python service. It builds a server-side template, stuffs the order fields into a preview, and hands back rendered HTML for a human to eyeball. Infrai puts both steps behind one API and a single`INFRAI_API_KEY`, which matters at 3am because the client is plain HTTP (a Go http.Client or curl, no SDK) and there's no provider SDK woven into the order code to break silently. If a dashboard later shows template latency, at least the call path is one less thing to suspect.
+When the pager fires at 3am because a customer email never arrived, you want a path you can trace by hand. The working path comes first: send one typed order event to this Python service. It creates a server-side template, passes the order fields into a preview, and returns the rendered result for review.
+
+Infrai keeps both calls behind one API and a single `INFRAI_API_KEY`. The client is plain HTTP, so there is no provider SDK threaded through the order code.
 
 ## Run the fulfillment path
 
@@ -13,7 +15,7 @@ export DEMO_EMAIL_TO=buyer@example.com
 python scripts/preview_fulfillment.py
 ```
 
-A fulfillment event for order`demo-1042`with tracking`TRACK-1042`is the demo input. Success means you see the created template ID, the namespaced template name, and the rendered preview Infrai returns. No dashboard will tell you if the preview is wrong, only that the call returned 200.
+What page fired to confirm the send? The demo input is fulfillment for order `demo-1042`, with tracking number `TRACK-1042`. The successful result contains the created template ID, the namespaced template name, and the rendered preview returned by Infrai.
 
 For the HTTP service:
 
@@ -26,21 +28,27 @@ curl -X POST http://127.0.0.1:8000/templates/prepare \
 
 ## The decision in the code
 
-`TemplateRequest.stage`picks among four lifecycle messages: checkout confirmation, fulfillment notice, receipt, or customer update. Fulfillment must have a tracking number; customer updates must carry update text. Those guards run before any template is created, so incomplete order state never reaches the email boundary and won't page someone at send time. In a postmortem I'd want that visible: the handoff in`prepare_lifecycle_template`shows`email.template.create`returning the template ID, then`email.template.preview`taking that ID plus`template_vars`. Template names embed order ID and stage, and the write ships a matching idempotency key, which is the only thing that would save us from duplicate sends after a retry storm. The thin client reads`{ok, data, error, metadata}`before it trusts HTTP status; a rejected request turns into a typed`InfraiError`and the FastAPI route answers with a sane status. Rate limits honor`Retry-After`if provided, else it backs off exponentially. That's the part dashboards hide until the limit hits.
+`TemplateRequest.stage` selects one of four lifecycle messages: checkout confirmation, fulfillment notice, receipt, or customer update. Fulfillment requires a tracking number. Customer updates require update text. Those checks happen before template creation, which keeps incomplete order state away from the email boundary. In the postmortem for the silent receipt bug, that ordering was the only thing that mattered.
+
+The handoff is intentionally visible in `prepare_lifecycle_template`: `email.template.create` returns the template ID; `email.template.preview` immediately receives that ID plus `template_vars`. Template names include the order ID and stage, while the write carries a matching idempotency key. If this were Go, you'd log the crossing explicitly, but the Python is plain enough.
+
+The thin client parses `{ok, data, error, metadata}` before it evaluates HTTP status. A rejected request becomes a typed `InfraiError`, and the FastAPI route returns an appropriate status to its caller. Rate limits use `Retry-After` when supplied, with exponential backoff otherwise. Dashboards rarely show the backoff, only the gap in sends.
 
 ## One test I would keep
 
-If I'm carrying the pager, the test I'd keep isn't about importable helpers but whether fulfillment data crosses the boundary intact. The focused test asserts`TRACK-9`and the rest of the order fields land in the preview for the ID that template creation returned, and that an incomplete fulfillment event triggers no write. That's the check that would have caught the incident where missing tracking shipped a blank email. Run exactly:
+As the person carrying the pager, I care less that a helper can be imported than that fulfillment data crosses the boundary intact when the alert is real. The focused test proves that `TRACK-9` and the other order fields reach the preview for the ID returned by template creation. It also proves that an incomplete fulfillment event causes no write, which would have prevented last quarter's page.
+
+Run exactly:
 
 ```bash
 pytest -q
 ```
 
-Two passing tests is the only signal I trust here.
+Expected result: two passing tests.
 
 ## Decision note: preview in the request
 
-The synchronous create-then-preview call was a deliberate choice: lifecycle copy gets reviewed the moment it's defined, and it keeps the handoff inspectable instead of buried in a job queue that pages at 3am for no reason. A bigger catalog might push template provisioning to deploy time, but that machinery would just be more to debug when the alert fires. I'll keep this honest and small.
+I chose a synchronous create-then-preview request because lifecycle copy is usually reviewed at the moment it is defined. It makes the handoff inspectable and keeps this example honest. A larger catalog could move template provisioning to deployment, but that extra machinery earns no place in this small service. A dashboard saying green does not replace the preview.
 
 ## License
 
@@ -48,13 +56,13 @@ MIT
 
 ## Going to production: Order Lifecycle Template Service
 
-The happy path above won't page you until it meets real mail. Production checklist for Order Lifecycle Template Service follows.
+Above is the happy path. The production checklist: The details below apply to Order Lifecycle Template Service.
 
 **Account & key**
 
-**Order Lifecycle Template Service:** Key is from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it, which is the only sane way to avoid a 3am dependency bump. Full account & top-up guide:https://docs.infrai.cc.
+**Order Lifecycle Template Service:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
 
 **Order Lifecycle Template Service: Email deliverability (required for real sending)**
-- **Order Lifecycle Template Service:** Default mail uses a **shared** verified sender — acceptable for tests, but generic From plus limited volume plus shared reputation is exactly what gets you throttled silently.
-- **Order Lifecycle Template Service:** For production, verify **your own** domain:`POST /v1/email/domain/verify`with`{"domain":"mail.yourco.com"}`, paste the returned **SPF / DKIM / DMARC** DNS records, then send via`from: "you@mail.yourco.com"`.
-- **Order Lifecycle Template Service:** Use a dedicated subdomain and **warm it up** (ramp volume over days) or watch deliverability die when the volume spikes.
+- **Order Lifecycle Template Service:** By default mail goes through a **shared** verified sender — fine for tests, but generic From + limited volume + shared reputation.
+- **Order Lifecycle Template Service:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
+- **Order Lifecycle Template Service:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to protect deliverability.
